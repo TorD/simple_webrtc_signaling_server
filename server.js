@@ -26,11 +26,47 @@ io.use((socket, next) => {
     }
 });
 
+let connections = new Map();
+/**
+ * @type {Map<string, Room>}
+ */
+let rooms = new Map();
+
+/**
+ * @typedef {Object} Room
+ * @property {Map<string, string>} nicknames
+ */
+/**
+ * @param {String} room 
+ * @return {Room}
+ */
+function getOrCreateRoom(room) {
+	if (rooms.has(room) === false) {
+		rooms.set(room, {
+			nicknames: new Map()
+		});
+	}
+
+	return rooms.get(room);
+}
+
+function removePeerFromRoom(peer, room) {
+	const oldRoomObject = rooms.get(oldRoom);
+	if (oldRoomObject !== undefined) {
+		oldRoomObject.nicknames.delete(peer);
+	}
+}
+
+function removePeerFromCurrentRoom(peer) {
+	const room = connections.get(peer);
+	removePeerFromRoom(peer, room);
+}
+
 // API ENDPOINT TO DISPLAY THE CONNECTION TO THE SIGNALING SERVER
-let connections = {};
-app.get("/connections", (req, res) => {
-    res.json(Object.values(connections));
-});
+
+// app.get("/connections", (req, res) => {
+//     res.json(Object.values(connections));
+// });
 
 // MESSAGING LOGIC
 io.on("connection", (socket) => {
@@ -59,6 +95,32 @@ io.on("connection", (socket) => {
             });
         }
     });
+
+	socket.on('join-room', ({ nickname, room }) => {
+		socket.join(room);
+
+		const roomObject = getOrCreateRoom(room);
+		roomObject.nicknames.set(socket.id, nickname);
+
+		io.to(room).emit('user-joined', {
+			nickname,
+			members: Array.from(roomObject.nicknames.values())
+		});
+	})
+
+	socket.on('leave-room', ({ nickname, room }) => {
+		socket.leave(room);
+
+		const roomObject = getOrCreateRoom(room);
+
+		roomObject.nicknames.delete(socket.id);
+
+		io.to(room).emit('user-left', {
+			nickname,
+			members: Array.from(roomObject.nicknames.values())
+		});
+	})
+
     socket.on("message", (message) => {
         // Send message to all peers expect the sender
         socket.broadcast.emit("message", message);
@@ -74,6 +136,10 @@ io.on("connection", (socket) => {
         }
     });
     socket.on("disconnect", () => {
+		rooms.forEach( (room) => {
+			room.nicknames.delete(socket.id);
+		})
+		
         const disconnectingPeer = Object.values(connections).find((peer) => peer.socketId === socket.id);
         if (disconnectingPeer) {
             console.log("Disconnected", socket.id, "with peerId", disconnectingPeer.peerId);
