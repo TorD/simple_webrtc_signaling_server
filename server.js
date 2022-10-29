@@ -58,10 +58,10 @@ function getOrCreateRoom(room) {
  * Verify an array of JSON map strings
  * @param {String[]} maps 
  */
-function verifyMaps(maps) {
+function validMaps(maps) {
 	return maps.some( (map) => {
-		return !map.layers || !map.version || !map.entities || !map.tileSize;
-	})
+		return !Array.isArray(map.layers) || !Array.isArray(map.entities) || map.created === undefined;
+	}) === false;
 }
 
 // API ENDPOINT TO DISPLAY THE CONNECTION TO THE SIGNALING SERVER
@@ -74,29 +74,29 @@ function verifyMaps(maps) {
 io.on("connection", (socket) => {
     console.log("User connected with id", socket.id);
 
-    socket.on("ready", (peerId, peerType) => {
-        // Make sure that the hostname is unique, if the hostname is already in connections, send an error and disconnect
-        if (peerId in connections) {
-            socket.emit("uniquenessError", {
-                message: `${peerId} is already connected to the signalling server. Please change your peer ID and try again.`,
-            });
-            socket.disconnect(true);
-        } else {
-            console.log(`Added ${peerId} to connections`);
-            // Let new peer know about all exisiting peers
-            socket.send({ from: "all", target: peerId, payload: { action: "open", connections: Object.values(connections), bePolite: false } }); // The new peer doesn't need to be polite.
-            // Create new peer
-            const newPeer = { socketId: socket.id, peerId, peerType };
-            // Updates connections object
-            connections[peerId] = newPeer;
-            // Let all other peers know about new peer
-            socket.broadcast.emit("message", {
-                from: peerId,
-                target: "all",
-                payload: { action: "open", connections: [newPeer], bePolite: true }, // send connections object with an array containing the only new peer and make all exisiting peers polite.
-            });
-        }
-    });
+    // socket.on("ready", (peerId, peerType) => {
+    //     // Make sure that the hostname is unique, if the hostname is already in connections, send an error and disconnect
+    //     if (peerId in connections) {
+    //         socket.emit("uniquenessError", {
+    //             message: `${peerId} is already connected to the signalling server. Please change your peer ID and try again.`,
+    //         });
+    //         socket.disconnect(true);
+    //     } else {
+    //         console.log(`Added ${peerId} to connections`);
+    //         // Let new peer know about all exisiting peers
+    //         socket.send({ from: "all", target: peerId, payload: { action: "open", connections: Object.values(connections), bePolite: false } }); // The new peer doesn't need to be polite.
+    //         // Create new peer
+    //         const newPeer = { socketId: socket.id, peerId, peerType };
+    //         // Updates connections object
+    //         connections[peerId] = newPeer;
+    //         // Let all other peers know about new peer
+    //         socket.broadcast.emit("message", {
+    //             from: peerId,
+    //             target: "all",
+    //             payload: { action: "open", connections: [newPeer], bePolite: true }, // send connections object with an array containing the only new peer and make all exisiting peers polite.
+    //         });
+    //     }
+    // });
 
 	socket.on('join-room', ({ nickname, room }, callback) => {
 		socket.join(room);
@@ -132,12 +132,19 @@ io.on("connection", (socket) => {
 
 		io.emit('users-update', { users: Array.from(roomObject.users.values()) });
 
+		const readyUsers = Array.from(roomObject.users.values()).filter( ({ ready }) => ready );
+
+		if (roomObject.users.size > 1 && readyUsers.length === roomObject.users.size) {
+			console.log(`Starting map in ${room}`)
+			io.emit('start-map', roomObject.currentMapIndex);
+		}
+
 		callback(true);
 	})
 
 	socket.on('set-room-maps', ({ maps, room }, callback) => {
 		if (rooms.has(room) === false) return callback?.(false, "Room does not exist");
-		if (verifyMaps(maps) === false) return callback?.(false, "Illegal map data found");
+		if (validMaps(maps) === false) return callback?.(false, "Illegal map data found");
 
 		const roomObject = rooms.get(room);
 
@@ -173,6 +180,10 @@ io.on("connection", (socket) => {
 		});
 	})
 
+	socket.on('broadcast-positions', (positions) => {
+		socket.broadcast.emit('player-positions', { peerID: socket.id, positions });
+	})
+
     socket.on("message", (message) => {
         // Send message to all peers expect the sender
         socket.broadcast.emit("message", message);
@@ -188,8 +199,10 @@ io.on("connection", (socket) => {
         }
     });
     socket.on("disconnect", () => {
-		rooms.forEach( (room) => {
+		rooms.forEach( (room, roomID) => {
 			room.users.delete(socket.id);
+
+			if (room.users.size === 0) rooms.delete(roomID);
 		})
 		
         const disconnectingPeer = Object.values(connections).find((peer) => peer.socketId === socket.id);

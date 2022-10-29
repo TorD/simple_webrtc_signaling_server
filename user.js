@@ -3,6 +3,7 @@ class User {
 	nickname = null;
 	leader = false;
 	ready = false;
+	positions = [];
 
 	constructor({ peerID, nickname, ready, leader }) {
 		Object.assign(this, { peerID, nickname, ready, leader });
