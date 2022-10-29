@@ -4,11 +4,13 @@ const express = require("express");
 const socketio = require("socket.io");
 const cors = require("cors");
 const sirv = require("sirv");
+const User = require("./user");
 
 // ENVIRONMENT VARIABLES
 const PORT = process.env.PORT || 3030;
 const DEV = process.env.NODE_ENV === "development";
 const TOKEN = process.env.TOKEN;
+const ROOM_SIZE = process.env.ROOM_SIZE;
 
 // SETUP SERVERS
 const app = express();
@@ -34,7 +36,7 @@ let rooms = new Map();
 
 /**
  * @typedef {Object} Room
- * @property {Map<string, string>} nicknames
+ * @property {Map<string, User>} users
  */
 /**
  * @param {String} room 
@@ -43,23 +45,23 @@ let rooms = new Map();
 function getOrCreateRoom(room) {
 	if (rooms.has(room) === false) {
 		rooms.set(room, {
-			nicknames: new Map()
+			maps: [],
+			currentMapIndex: 0,
+			users: new Map()
 		});
 	}
 
 	return rooms.get(room);
 }
 
-function removePeerFromRoom(peer, room) {
-	const oldRoomObject = rooms.get(oldRoom);
-	if (oldRoomObject !== undefined) {
-		oldRoomObject.nicknames.delete(peer);
-	}
-}
-
-function removePeerFromCurrentRoom(peer) {
-	const room = connections.get(peer);
-	removePeerFromRoom(peer, room);
+/**
+ * Verify an array of JSON map strings
+ * @param {String[]} maps 
+ */
+function verifyMaps(maps) {
+	return maps.some( (map) => {
+		return !map.layers || !map.version || !map.entities || !map.tileSize;
+	})
 }
 
 // API ENDPOINT TO DISPLAY THE CONNECTION TO THE SIGNALING SERVER
@@ -96,16 +98,54 @@ io.on("connection", (socket) => {
         }
     });
 
-	socket.on('join-room', ({ nickname, room }) => {
+	socket.on('join-room', ({ nickname, room }, callback) => {
 		socket.join(room);
 
-		const roomObject = getOrCreateRoom(room);
-		roomObject.nicknames.set(socket.id, nickname);
+		console.log(`${nickname} joined ${room}`)
 
-		io.to(room).emit('user-joined', {
-			nickname,
-			members: Array.from(roomObject.nicknames.values())
-		});
+		const roomObject = getOrCreateRoom(room);
+
+		if (roomObject.users.size + 1 > ROOM_SIZE) {
+			callback(false, {error: "This room is full"});
+		}
+		else {
+			roomObject.users.set(socket.id, new User({
+				leader: roomObject.users.size === 0, // first user of a room becomes leader
+				peerID: socket.id,
+				nickname,
+			}));
+	
+			io.to(room).emit('user-joined', {
+				nickname,
+				users: Array.from(roomObject.users.values())
+			});
+
+			callback(true, { maps: roomObject.maps });
+		}
+	})
+
+	socket.on('set-ready', ({ ready, room }, callback) => {
+		if (rooms.has(room) === false) return callback(false, `Room ${room} does not exist`);
+
+		const roomObject = rooms.get(room);
+		roomObject.users.get(socket.id).ready = ready;
+
+		io.emit('users-update', { users: Array.from(roomObject.users.values()) });
+
+		callback(true);
+	})
+
+	socket.on('set-room-maps', ({ maps, room }, callback) => {
+		if (rooms.has(room) === false) return callback?.(false, "Room does not exist");
+		if (verifyMaps(maps) === false) return callback?.(false, "Illegal map data found");
+
+		const roomObject = rooms.get(room);
+
+		roomObject.maps = maps;
+
+		io.to(room).emit('updated-room-maps', { room, maps });
+
+		callback?.(true);
 	})
 
 	socket.on('leave-room', ({ nickname, room }) => {
@@ -113,11 +153,23 @@ io.on("connection", (socket) => {
 
 		const roomObject = getOrCreateRoom(room);
 
-		roomObject.nicknames.delete(socket.id);
+		const user = roomObject.users.get(socket.id);
 
-		io.to(room).emit('user-left', {
+		roomObject.users.delete(socket.id);
+
+		if (user?.leader) {
+			const newRoomLeader = roomObject.users.values().next().value
+
+			if (newRoomLeader) newRoomLeader.leader = true;
+		}
+
+		console.log("User left", roomObject.users.size)
+
+		if (roomObject.users.size === 0) rooms.delete(room);
+
+		socket.to(room).emit('user-left', {
 			nickname,
-			members: Array.from(roomObject.nicknames.values())
+			users: Array.from(roomObject.users.values())
 		});
 	})
 
@@ -137,7 +189,7 @@ io.on("connection", (socket) => {
     });
     socket.on("disconnect", () => {
 		rooms.forEach( (room) => {
-			room.nicknames.delete(socket.id);
+			room.users.delete(socket.id);
 		})
 		
         const disconnectingPeer = Object.values(connections).find((peer) => peer.socketId === socket.id);
